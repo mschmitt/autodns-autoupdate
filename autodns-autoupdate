@@ -1,0 +1,128 @@
+#!/bin/bash
+
+# Autopilot for DNSSEC key rollovers at registrar InternetX.
+# Developed and tested with OpenDNSSEC 1.4 only for now.
+
+BASEDIR="$(dirname "$(readlink -f "$0")")"
+INXUSER="$(cat "$BASEDIR/etc/username")"
+INXPASS="$(cat "$BASEDIR/etc/password")"
+INXMAIL="$(cat "$BASEDIR/etc/mailto")"
+INXURL='https://gateway.autodns.com'
+
+for DOMAIN in $(ods-ksmutil key list | awk '/waiting for ds-seen/{print $1}')
+do
+	echo "--- $DOMAIN ---"
+	echo "$DOMAIN: Waiting for ds-seen"
+
+	# Test whether Domain has a key ready
+	KEYTEMP="$(mktemp)"
+	if ods-ksmutil key export --zone "$DOMAIN" --keystate ready | egrep "^$DOMAIN.*DNSKEY" > "$KEYTEMP"
+	then
+		echo "$DOMAIN: Has a key in ready state."
+		WANT_FLAG=$(awk '{print $5}' < "$KEYTEMP")
+		WANT_PROTOCOL=$(awk '{print $6}' < "$KEYTEMP")
+		WANT_ALGORITHM=$(awk '{print $7}' < "$KEYTEMP")
+		WANT_PUBLICKEY=$(awk '{print $8}' < "$KEYTEMP")
+		WANT_KEYID=$(sed 's/^.*id = \([0-9][0-9]*\).*$/\1/' < "$KEYTEMP")
+	else
+		echo "$DOMAIN: No key in ready state, why am I here."
+		continue
+	fi
+	rm "$KEYTEMP"
+
+	# Test whether key is already known at registrar
+	CURLPOSTDATA="$(mktemp)"
+	CURLRESULT="$(mktemp)"
+	cat <<-EOF > "$CURLPOSTDATA"
+	<?xml version="1.0" encoding="utf-8"?>
+	<request>
+	<auth>
+	<user>$INXUSER</user>
+	<password>$INXPASS</password>
+	<context>4</context>
+	</auth>
+	<task>
+	<code>0105</code>
+	<domain>
+	<name>$DOMAIN</name>
+	</domain>
+	</task>
+	</request>
+	EOF
+
+	if ! curl --silent --show-error --data @"$CURLPOSTDATA" "$INXURL" -o "$CURLRESULT"
+	then
+		# Curl failed altogether, fyi only, will be retried on next execution
+		echo "$DOMAIN: Failed to retrieve info (curl)."
+		xml2 < "$CURLRESULT"
+		rm "$CURLPOSTDATA"
+		rm "$CURLRESULT"
+	elif grep -q "$WANT_PUBLICKEY" "$CURLRESULT"
+	then
+		# Public key is already in place
+		echo "$DOMAIN: New key already at registrar."
+		rm "$CURLPOSTDATA"
+		rm "$CURLRESULT"
+
+		# Mark key as seen in OpenDNSSEC
+		echo "$DOMAIN: Marking key $WANT_KEYID as seen."
+		ods-ksmutil key ds-seen --zone "$DOMAIN" --keytag "$WANT_KEYID"
+		sleep 5
+	else
+		# Key not at registrar. Publish now.
+		echo "$DOMAIN: Will now publish the ready key."
+		CURLPOSTDATA="$(mktemp)"
+		CURLRESULT="$(mktemp)"
+		cat <<-EOF > "$CURLPOSTDATA"
+		<?xml version="1.0" encoding="utf-8"?>
+		<request>
+		<auth>
+		<user>$INXUSER</user>
+		<password>$INXPASS</password>
+		<context>4</context>
+		</auth>
+		<task>
+		<code>0102007</code>
+		<domain>
+		<name>$DOMAIN</name>
+		<dnssec>
+		<algorithm>$WANT_ALGORITHM</algorithm>
+		<flags>$WANT_FLAG</flags>
+		<protocol>$WANT_PROTOCOL</protocol>
+		<publickey>$WANT_PUBLICKEY</publickey>
+		</dnssec>
+		</domain>
+		<reply_to>$INXMAIL</reply_to>
+		</task>
+		</request>
+		EOF
+
+		# Error message fyi only, will be retried on next execution
+		if ! curl --silent --show-error --data @"$CURLPOSTDATA" "$INXURL" -o "$CURLRESULT"
+		then
+			# DNSSEC-Update failed
+			echo "Failed to update info for domain: $DOMAIN"
+			xml2 < "$CURLRESULT"
+			rm "$CURLPOSTDATA"
+			rm "$CURLRESULT"
+		else
+			STATUSTEXT=$(xml2 < "$CURLRESULT" | awk -F= '/response.result.status.text/{print $2}')
+			STATUSTYPE=$(xml2 < "$CURLRESULT" | awk -F= '/response.result.status.type/{print $2}')
+			if [[ "$STATUSTYPE" == "error" ]]
+			then
+				xml2 < "$CURLRESULT"
+			else
+				echo "$STATUSTEXT"
+			fi
+			rm "$CURLPOSTDATA"
+			rm "$CURLRESULT"
+		fi
+	fi
+	echo ""
+	DONE_ANYTHING=1
+done
+
+if [[ $DONE_ANYTHING != 1 && -t 0 ]]
+then
+	echo "Nothing to do, no key in ready state."
+fi
