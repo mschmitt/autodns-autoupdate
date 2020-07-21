@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Autopilot for DNSSEC key rollovers at registrar InternetX.
-# Developed and tested with OpenDNSSEC 1.4 only for now.
+# Adapted for use with OpenDNSSEC 2.1
 
 BASEDIR="$(dirname "$(readlink -f "$0")")"
 INXUSER="$(cat "$BASEDIR/etc/username")"
@@ -9,21 +9,21 @@ INXPASS="$(cat "$BASEDIR/etc/password")"
 INXMAIL="$(cat "$BASEDIR/etc/mailto")"
 INXURL='https://gateway.autodns.com'
 
-for DOMAIN in $(ods-ksmutil key list | awk '/waiting for ds-seen/{print $1}')
+for DOMAIN in $(/usr/sbin/ods-enforcer key list --keytype ksk | awk '/waiting for ds-seen/{print $1}')
 do
 	echo "--- $DOMAIN ---"
 	echo "$DOMAIN: Waiting for ds-seen"
 
 	# Test whether Domain has a key ready
 	KEYTEMP="$(mktemp)"
-	if ods-ksmutil key export --zone "$DOMAIN" --keystate ready | egrep "^$DOMAIN.*DNSKEY" > "$KEYTEMP"
+	if /usr/sbin/ods-enforcer key export --zone "$DOMAIN" --keytype ksk --keystate ready | egrep "^$DOMAIN.*DNSKEY" > "$KEYTEMP"
 	then
 		echo "$DOMAIN: Has a key in ready state."
 		WANT_FLAG=$(awk '{print $5}' < "$KEYTEMP")
 		WANT_PROTOCOL=$(awk '{print $6}' < "$KEYTEMP")
 		WANT_ALGORITHM=$(awk '{print $7}' < "$KEYTEMP")
 		WANT_PUBLICKEY=$(awk '{print $8}' < "$KEYTEMP")
-		WANT_KEYID=$(sed 's/^.*id = \([0-9][0-9]*\).*$/\1/' < "$KEYTEMP")
+		WANT_KEYID=$(ods-enforcer key list --keystate ready --keytype ksk --verbose | awk "/^$DOMAIN/{print \$NF}")
 	else
 		echo "$DOMAIN: No key in ready state, why am I here."
 		continue
@@ -66,7 +66,7 @@ do
 
 		# Mark key as seen in OpenDNSSEC
 		echo "$DOMAIN: Marking key $WANT_KEYID as seen."
-		ods-ksmutil key ds-seen --zone "$DOMAIN" --keytag "$WANT_KEYID"
+		/usr/sbin/ods-enforcer key ds-seen --zone "$DOMAIN" --keytag "$WANT_KEYID"
 		sleep 5
 	else
 		# Key not at registrar. Publish now.
