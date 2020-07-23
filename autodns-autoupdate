@@ -23,7 +23,7 @@ do
 		WANT_PROTOCOL=$(awk '{print $6}' < "$KEYTEMP")
 		WANT_ALGORITHM=$(awk '{print $7}' < "$KEYTEMP")
 		WANT_PUBLICKEY=$(awk '{print $8}' < "$KEYTEMP")
-		WANT_KEYID=$(ods-enforcer key list --keystate ready --keytype ksk --verbose | awk "/^$DOMAIN/{print \$NF}")
+		WANT_KEYID=$(/usr/sbin/ods-enforcer key list --keystate ready --keytype ksk --verbose | awk "/^$DOMAIN/{print \$NF}")
 	else
 		echo "$DOMAIN: No key in ready state, why am I here."
 		continue
